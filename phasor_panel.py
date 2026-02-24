@@ -1,5 +1,8 @@
+import io
+
 import panel as pn
 import numpy as np
+import pandas as pd
 import xarray as xr
 import holoviews as hv
 from holoviews import streams
@@ -46,21 +49,33 @@ def make_gaussian(wavelengths: np.ndarray, mean: float, std: float) -> np.ndarra
     return np.exp(-0.5 * ((wavelengths - mean) / std) ** 2)
 
 
-def make_dataset(
-    wavelengths: np.ndarray, intensities: np.ndarray, harmonic_n: int
+def make_spectra_dataset(
+    wavelengths: np.ndarray,
+    intensities: np.ndarray,
+    harmonic_n: int,
+    sample_names: list[str] | None = None,
 ) -> xr.Dataset:
-    """Build a clean xr.Dataset from a (samples × wavelength) array."""
+    """Build a clean xr.Dataset from a (samples × wavelength) array.
+
+    If *sample_names* is provided, a ``sample_name`` coordinate is attached
+    along the ``sample`` dimension.  The ``sample`` dimension itself stays
+    integer-valued so positional indexing keeps working everywhere.
+    """
     n_samples = intensities.shape[0]
+    coords: dict = {
+        "sample": np.arange(n_samples),
+        "wavelength": wavelengths,
+    }
+    if sample_names is not None:
+        coords["sample_name"] = ("sample", list(sample_names))
+
     ds = xr.Dataset(
         data_vars={
             "intensity": (["sample", "wavelength"], intensities),
             "G": (["sample"], np.full(n_samples, np.nan)),
             "S": (["sample"], np.full(n_samples, np.nan)),
         },
-        coords={
-            "sample": np.arange(n_samples),
-            "wavelength": wavelengths,
-        },
+        coords=coords,
         attrs={"harmonic": harmonic_n},
     )
     ds.wavelength.attrs = {"units": "nm"}
@@ -71,6 +86,51 @@ def make_dataset(
 
 def get_wavelengths(start: float, step: float, end: float) -> np.ndarray:
     return np.arange(start, end + step / 2, step)
+
+
+def parse_uploaded_csv(file_bytes: bytes) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """Parse an instrument-exported CSV into (wavelengths, intensities, names).
+
+    Expected layout
+    ---------------
+    Row 0 : sample names in columns 0, 2, 4, …  (odd cols empty)
+    Row 1 : repeated "Wavelength (nm), Intensity (a.u.)" headers
+    Row 2+ : data pairs  (wavelength, intensity) × N_samples
+    A blank row marks the end of the spectral data.
+
+    Returns
+    -------
+    wavelengths : 1-D array  (N_wl,)
+    intensities : 2-D array  (N_samples, N_wl)
+    names       : list[str]  length N_samples
+    """
+    text = file_bytes.decode("utf-8", errors="replace")
+    lines = text.splitlines()
+
+    # ── Row 0: sample names ──────────────────────────────────────────────
+    header_cells = lines[0].split(",")
+    # Names sit at even indices (0, 2, 4, …)
+    names = [header_cells[i].strip() for i in range(0, len(header_cells), 2) if header_cells[i].strip()]
+
+    # ── Find the first blank row (signals end of data) ───────────────────
+    data_end = len(lines)
+    for idx, line in enumerate(lines[2:], start=2):   # skip header rows
+        if line.strip() == "" or line.replace(",", "").strip() == "":
+            data_end = idx
+            break
+
+    # ── Parse numeric block ──────────────────────────────────────────────
+    # Use pandas for robust float parsing of the data block
+    csv_block = "\n".join(lines[2:data_end])
+    df = pd.read_csv(io.StringIO(csv_block), header=None)
+
+    n_samples = len(names)
+    wavelengths = df.iloc[:, 0].to_numpy(dtype=float)
+    intensities = np.column_stack(
+        [df.iloc[:, 2 * i + 1].to_numpy(dtype=float) for i in range(n_samples)]
+    ).T  # shape (n_samples, n_wavelengths)
+
+    return wavelengths, intensities, names
 
 
 # ── Plot helpers ─────────────────────────────────────────────────────────────
@@ -159,7 +219,7 @@ def build_spectrum_dmap(
             frame_height=500,
             line_width=3,
             tools=["hover"],
-            hover_tooltips=[("sample","@sample"), ("wavelength","@x"), ("intensity","@y")],
+            # hover_tooltips=[("sample","@sample"), ("wavelength","@x"), ("intensity","@y")],
             xlabel="wavelength (nm)",
             ylabel="intensity",
             title="spectrum"
@@ -195,7 +255,7 @@ def build_spectrum_dmap(
             show_legend=False,
         )
 
-    return hv.DynamicMap(select_spectrum, streams=[selection])
+    return hv.DynamicMap(select_spectrum, streams=[selection]).opts(framewise=True)
 
 
 # ── Global widgets ────────────────────────────────────────────────────────────
@@ -225,6 +285,10 @@ t1_std = pn.widgets.FloatSlider(
     name="Std (nm)", start=1, end=150, value=20, step=1
 )
 
+# ── Tab 3 widgets: CSV upload ─────────────────────────────────────────────────
+
+t3_file_input = pn.widgets.FileInput(accept=".csv", multiple=False, name="Upload CSV")
+
 # ── Tab 2 widgets: multi gaussian + noise ────────────────────────────────────
 
 t2_n_samples = pn.widgets.IntSlider(
@@ -249,11 +313,8 @@ t2_snr = pn.widgets.FloatSlider(
     name="SNR (dB)", start=0, end=40, value=20, step=1, disabled=True
 )
 
-
-# Enable/disable SNR slider when noise toggle changes
 def _toggle_snr(event):
     t2_snr.disabled = not event.new
-
 
 t2_add_noise.param.watch(_toggle_snr, "value")
 
@@ -286,7 +347,7 @@ def tab1_view(start, step, end, h, mean, std, show_ind):
     wl = get_wavelengths(start, step, end)
     # Single sample: shape (1, N_wl)
     intensity = make_gaussian(wl, mean, std)[np.newaxis, :]
-    ds = make_dataset(wl, intensity, h)
+    ds = make_spectra_dataset(wl, intensity, h)
     ds = calculate_phasor_transform(ds)
     ds = add_spectral_reference(ds)
 
@@ -343,13 +404,64 @@ def tab2_view(
         noise = rng.standard_normal(intensities.shape) * noise_std
         intensities = np.clip(intensities + noise, 0, None)
 
-    ds = make_dataset(wl, intensities, h)
+    ds = make_spectra_dataset(wl, intensities, h)
     ds = calculate_phasor_transform(ds)
     ds = add_spectral_reference(ds)
 
     phasor_plot, sample_plot, color_mapping = create_phasor_plot(ds)
     dmap = build_spectrum_dmap(ds, sample_plot, color_mapping, show_individual=show_ind)
     return pn.Row(phasor_plot, dmap, sizing_mode="stretch_width")
+
+
+@pn.depends(
+    t3_file_input,
+    harmonic_input,
+    show_individual,
+)
+def tab3_view(file_bytes, h, show_ind):
+    if file_bytes is None:
+        return pn.pane.Alert(
+            "Upload a CSV file to begin.  "
+            "The wavelength range and spacing will be read from the file "
+            "(the global λ parameters are **ignored** for this tab).",
+            alert_type="warning",
+        )
+
+    try:
+        wavelengths, intensities, sample_names = parse_uploaded_csv(file_bytes)
+    except Exception as exc:
+        return pn.pane.Alert(f"Error parsing CSV: {exc}", alert_type="danger")
+
+    wl_start, wl_end = wavelengths[0], wavelengths[-1]
+    wl_step = np.median(np.diff(wavelengths))
+    sample_lines = "\n".join(
+        f"| {i} | {name} |" for i, name in enumerate(sample_names)
+    )
+    info_md = pn.pane.Markdown(
+        f"**CSV info** — {len(sample_names)} samples, \n\n"
+        f"λ {wl_start:.1f}–{wl_end:.1f} nm, "
+        f"step ≈ {wl_step:.2f} nm\n\n"
+        f"| Index | Sample name |\n"
+        f"|------:|-------------|\n"
+        f"{sample_lines}"
+    )
+    warning = pn.pane.Alert(
+        "⚠️ Wavelength range and spacing are taken from the uploaded CSV.  "
+        "The global λ start / step / end parameters do **not** apply to this tab.",
+        alert_type="warning",
+    )
+
+    ds = make_spectra_dataset(wavelengths, intensities, h, sample_names=sample_names)
+    ds = calculate_phasor_transform(ds)
+    ds = add_spectral_reference(ds)
+
+    phasor_plot, sample_plot, color_mapping = create_phasor_plot(ds)
+    dmap = build_spectrum_dmap(ds, sample_plot, color_mapping, show_individual=show_ind)
+    return pn.Column(
+        warning,
+        info_md,
+        pn.Row(phasor_plot, dmap, sizing_mode="stretch_width"),
+    )
 
 
 # ── Sidebar layout ────────────────────────────────────────────────────────────
@@ -367,7 +479,7 @@ global_card = pn.Card(
 tab1_card = pn.Card(
     t1_mean,
     t1_std,
-    title="① Single Gaussian",
+    title="1) Single Gaussian",
     collapsed=False,
 )
 
@@ -380,7 +492,13 @@ tab2_card = pn.Card(
     pn.layout.Divider(),
     t2_add_noise,
     t2_snr,
-    title="② Multi Gaussian + Noise",
+    title="2) Multi Gaussian + Noise",
+    collapsed=True,
+)
+
+tab3_card = pn.Card(
+    t3_file_input,
+    title="3) Fluorescence Spectra (CSV)",
     collapsed=True,
 )
 
@@ -388,6 +506,7 @@ sidebar = pn.Column(
     global_card,
     tab1_card,
     tab2_card,
+    tab3_card,
     margin=(10, 10),
 )
 
@@ -402,12 +521,39 @@ header = pn.Column(
 )
 
 main_tabs = pn.Tabs(
-    ("① Single Gaussian", tab1_view),
-    ("② Multi Gaussian + Noise", tab2_view),
+    ("1) Single Gaussian", tab1_view),
+    ("2) Multi Gaussian + Noise", tab2_view),
+    ("3) Fluorescence Spectra (CSV)", tab3_view),
     dynamic=True,
 )
 
 main_area = pn.Column(header, main_tabs, margin=(10, 20))
+
+# ── Sync tab ↔ sidebar card collapse ──────────────────────────────────────────
+
+_tab_cards = {0: tab1_card, 1: tab2_card, 2: tab3_card}
+
+
+def _sync_cards(event):
+    """Collapse every tab-specific card except the one for the active tab."""
+    for idx, card in _tab_cards.items():
+        card.collapsed = idx != event.new
+
+
+main_tabs.param.watch(_sync_cards, "active")
+
+# ── Auto-enable show_individual on CSV upload ─────────────────────────────────
+
+
+def _on_csv_upload(event):
+    if event.new is not None:
+        show_individual.value = True
+        main_tabs.active = 2
+        pn.state.location.reload = False
+        pn.state.location.reload = True
+
+
+t3_file_input.param.watch(_on_csv_upload, "value")
 
 template = pn.template.BootstrapTemplate(
     site="Spectral Analysis",
