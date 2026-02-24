@@ -7,7 +7,9 @@ import xarray as xr
 import holoviews as hv
 from holoviews import streams
 from itertools import cycle
+from matplotlib.path import Path as MplPath
 import colorcet
+import tifffile
 import hvplot.xarray   # noqa: F401 – registers hvplot accessor
 import hvplot.pandas   # noqa: F401 – registers hvplot accessor on DataFrames
 
@@ -289,6 +291,10 @@ t1_std = pn.widgets.FloatSlider(
 
 t3_file_input = pn.widgets.FileInput(accept=".csv", multiple=False, name="Upload CSV")
 
+# ── Tab 4 widgets: TIFF image upload ─────────────────────────────────────────
+
+t4_file_input = pn.widgets.FileInput(accept=".tif,.tiff", multiple=False, name="Upload TIFF")
+
 # ── Tab 2 widgets: multi gaussian + noise ────────────────────────────────────
 
 t2_n_samples = pn.widgets.IntSlider(
@@ -464,6 +470,314 @@ def tab3_view(file_bytes, h, show_ind):
     )
 
 
+@pn.depends(
+    t4_file_input,
+    harmonic_input,
+    start_lambda_input,
+    end_lambda_input,
+)
+def tab4_view(file_bytes, h, start, end):
+    combined_warning = pn.pane.Alert(
+        "⚠️ **Show Individual Spectra** is not available in TIFF image mode — "
+        "selections show averaged spectra only.  "
+        "**Step λ** is ignored: wavelengths are computed as "
+        "linspace(Start λ, End λ, n_frames) using the number of TIFF frames.",
+        alert_type="warning",
+    )
+
+    if file_bytes is None:
+        return pn.Column(
+            combined_warning,
+            pn.pane.Alert(
+                "Upload a TIFF stack to begin.  "
+                "Set Start λ and End λ in the Global Parameters sidebar first.",
+                alert_type="secondary",
+            ),
+        )
+
+    if start >= end:
+        return pn.pane.Alert("Start λ must be less than End λ.", alert_type="danger")
+
+    try:
+        arr = tifffile.imread(io.BytesIO(file_bytes))
+    except Exception as exc:
+        return pn.pane.Alert(f"Error reading TIFF: {exc}", alert_type="danger")
+
+    # Normalise to (n_frames, H, W)
+    if arr.ndim == 2:
+        arr = arr[np.newaxis, :, :]
+    elif arr.ndim == 3:
+        pass  # already (n_frames, H, W) from tifffile
+    else:
+        return pn.pane.Alert(
+            f"Unexpected TIFF shape {arr.shape}. Expected a 3-D stack.",
+            alert_type="danger",
+        )
+
+    n_frames, H, W = arr.shape
+    wavelengths = np.linspace(start, end, n_frames)
+    wl_step_auto = (end - start) / max(n_frames - 1, 1)
+
+    info_md = pn.pane.Markdown(
+        f"**TIFF info** — {n_frames} frames, {H}×{W} px  \n"
+        f"λ {start:.1f}–{end:.1f} nm, auto step ≈ {wl_step_auto:.2f} nm"
+    )
+
+    # ── Build xarray Dataset ───────────────────────────────────────────────────
+    intensities_2d = arr.astype(float).transpose(1, 2, 0).reshape(H * W, n_frames)
+    x_coords = np.repeat(np.arange(H), W)
+    y_coords = np.tile(np.arange(W), H)
+    ds = xr.Dataset(
+        data_vars={
+            "intensity": (["sample", "wavelength"], intensities_2d),
+            "G": (["sample"], np.full(H * W, np.nan)),
+            "S": (["sample"], np.full(H * W, np.nan)),
+        },
+        coords={
+            "sample": np.arange(H * W),
+            "x": ("sample", x_coords),
+            "y": ("sample", y_coords),
+            "wavelength": wavelengths,
+        },
+        attrs={"harmonic": h},
+    )
+    ds.wavelength.attrs = {"units": "nm"}
+    ds = calculate_phasor_transform(ds)
+    ds = add_spectral_reference(ds)
+
+    # ── Pre-extract arrays ─────────────────────────────────────────────────────
+    _x      = ds["x"].values.astype(int)
+    _y      = ds["y"].values.astype(int)
+    _G      = ds["G"].values
+    _S      = ds["S"].values
+    _wl     = wavelengths
+    _Gref   = ds["G_ref"].values
+    _Sref   = ds["S_ref"].values
+    _wlref  = ds["wavelength_ref"].values
+    _intmat = ds["intensity"].values
+    _xdim   = np.arange(H)
+    _ydim   = np.arange(W)
+    _EMPTY  = (0.0, 0.0, 0.0, 0.0)
+    _IMG_WW = 420
+
+    ds_indexed = ds.set_index(sample=["x", "y"])
+    intensity_unstacked = ds_indexed["intensity"].unstack("sample")  # (wavelength, x, y)
+
+    # ── Mask helpers ───────────────────────────────────────────────────────────
+    def _imask_box(b):
+        if b is None or b == _EMPTY:
+            return np.zeros(len(_x), dtype=bool)
+        x0, y0, x1, y1 = b
+        return ((_x >= min(x0, x1)) & (_x <= max(x0, x1)) &
+                (_y >= min(y0, y1)) & (_y <= max(y0, y1)))
+
+    def _pmask_box(b):
+        if b is None or b == _EMPTY:
+            return np.zeros(len(_G), dtype=bool)
+        g0, s0, g1, s1 = b
+        return ((_G >= min(g0, g1)) & (_G <= max(g0, g1)) &
+                (_S >= min(s0, s1)) & (_S <= max(s0, s1)))
+
+    def _imask_lasso(geom):
+        if geom is None or len(geom) < 3:
+            return np.zeros(len(_x), dtype=bool)
+        return MplPath(geom).contains_points(np.column_stack([_x.astype(float), _y.astype(float)]))
+
+    def _pmask_lasso(geom):
+        if geom is None or len(geom) < 3:
+            return np.zeros(len(_G), dtype=bool)
+        return MplPath(geom).contains_points(np.column_stack([_G, _S]))
+
+    def _imask(bounds, geom):
+        return _imask_box(bounds) | _imask_lasso(geom)
+
+    def _pmask(bounds, geom):
+        return _pmask_box(bounds) | _pmask_lasso(geom)
+
+    # ── Controls ───────────────────────────────────────────────────────────────
+    wl_slider_t4 = pn.widgets.DiscreteSlider(
+        name="Wavelength (nm)",
+        options={f"{w:.1f} nm": i for i, w in enumerate(_wl)},
+        value=0,
+        width=_IMG_WW,
+    )
+    mode_toggle_t4 = pn.widgets.RadioButtonGroup(
+        name="Selection mode",
+        options=["Image", "Phasor"],
+        value="Image",
+        button_type="primary",
+    )
+    reset_btn_t4 = pn.widgets.Button(name="↺  Reset", button_type="warning", width=100)
+
+    # ── Streams ────────────────────────────────────────────────────────────────
+    img_bounds_t4 = streams.BoundsXY(bounds=_EMPTY)
+    ph_bounds_t4  = streams.BoundsXY(bounds=_EMPTY)
+    img_lasso_t4  = streams.Lasso(geometry=None)
+    ph_lasso_t4   = streams.Lasso(geometry=None)
+
+    def _reset_all_t4():
+        img_bounds_t4.event(bounds=_EMPTY)
+        ph_bounds_t4.event(bounds=_EMPTY)
+        img_lasso_t4.event(geometry=None)
+        ph_lasso_t4.event(geometry=None)
+
+    mode_toggle_t4.param.watch(lambda e: _reset_all_t4(), "value")
+    reset_btn_t4.on_click(lambda e: _reset_all_t4())
+
+    # ── Base image DynamicMap ──────────────────────────────────────────────────
+    def _base_image_t4(wl_idx, mode, ibounds, igeom):
+        data  = intensity_unstacked.isel(wavelength=wl_idx).values
+        has_img_sel = _imask(ibounds, igeom).any()
+        go_gray = (mode == "Phasor") or (mode == "Image" and has_img_sel)
+        cmap  = "gray"  if go_gray else "viridis"
+        alpha = 0.25    if go_gray else 1.0
+        return hv.Image(
+            (_xdim, _ydim, data.T),
+            kdims=["x", "y"], vdims=["intensity"],
+        ).opts(
+            cmap=cmap, colorbar=True, alpha=alpha,
+            frame_width=_IMG_WW, frame_height=_IMG_WW,
+            title=f"Image  —  {_wl[wl_idx]:.1f} nm",
+            tools=["box_select", "lasso_select", "wheel_zoom"],
+            active_tools=["wheel_zoom"],
+        )
+
+    base_img_dmap_t4 = hv.DynamicMap(pn.bind(
+        _base_image_t4,
+        wl_idx=wl_slider_t4,
+        mode=mode_toggle_t4,
+        ibounds=img_bounds_t4.param.bounds,
+        igeom=img_lasso_t4.param.geometry,
+    ))
+    img_bounds_t4.source = base_img_dmap_t4
+    img_lasso_t4.source  = base_img_dmap_t4
+
+    # ── Static phasor background ───────────────────────────────────────────────
+    phasor_bg_t4 = hv.Points(pd.DataFrame({"G": _G, "S": _S}), kdims=["G", "S"]).opts(
+        color="lightgray", size=3, alpha=0.3,
+        frame_width=_IMG_WW, frame_height=_IMG_WW,
+        tools=["box_select", "lasso_select", "wheel_zoom"],
+        active_tools=["wheel_zoom"],
+        xlabel="G", ylabel="S", show_grid=True, padding=0.1,
+        title="Phasor",
+    )
+    ph_bounds_t4.source = phasor_bg_t4
+    ph_lasso_t4.source  = phasor_bg_t4
+
+    # ── Reference arc ─────────────────────────────────────────────────────────
+    ref_arc_t4 = hv.Points(
+        pd.DataFrame({"G": _Gref, "S": _Sref, "wl": _wlref}),
+        kdims=["G", "S"], vdims=["wl"],
+    ).opts(color="wl", cmap="Spectral_r", size=6, alpha=0.6, colorbar=False, tools=["hover"])
+
+    # ── Callbacks ─────────────────────────────────────────────────────────────
+    def _make_phasor_overlay_t4(ibounds, igeom, pbounds, pgeom, mode):
+        if mode == "Image":
+            m, color = _imask(ibounds, igeom), "steelblue"
+        else:
+            m, color = _pmask(pbounds, pgeom), "tomato"
+        df = pd.DataFrame({"G": _G[m], "S": _S[m]}) if m.any() else pd.DataFrame({"G": [], "S": []})
+        return hv.Points(df, kdims=["G", "S"]).opts(color=color, size=5, alpha=0.9)
+
+    def _make_image_overlay_t4(ibounds, igeom, pbounds, pgeom, wl_idx, mode):
+        data = intensity_unstacked.isel(wavelength=wl_idx).values.copy()
+        if mode == "Image":
+            m = _imask(ibounds, igeom)
+        else:
+            m = _pmask(pbounds, pgeom)
+        if not m.any():
+            empty = np.full((H, W), np.nan)
+            return hv.Image((_xdim, _ydim, empty), kdims=["x", "y"], vdims=["intensity"]).opts(
+                alpha=0, colorbar=False,
+            )
+        sel_grid = np.zeros((H, W), dtype=bool)
+        sel_grid[_x[m], _y[m]] = True
+        masked = np.where(sel_grid, data, np.nan)
+        return hv.Image(
+            (_xdim, _ydim, masked.T),
+            kdims=["x", "y"], vdims=["intensity"],
+        ).opts(
+            cmap="viridis", alpha=1.0, colorbar=False,
+            clim=(float(np.nanmin(data)), float(np.nanmax(data))),
+        )
+
+    def _make_spectrum_t4(ibounds, igeom, pbounds, pgeom, mode):
+        if mode == "Image":
+            mask, color, src = _imask(ibounds, igeom), "steelblue", "image sel"
+        else:
+            mask, color, src = _pmask(pbounds, pgeom), "tomato", "phasor sel"
+        n = int(mask.sum())
+        if n == 0:
+            avg   = _intmat.mean(axis=0)
+            title = "Average Spectrum (all pixels)"
+            color = "gray"
+        else:
+            avg   = _intmat[mask].mean(axis=0)
+            title = f"Average Spectrum — {src}  ({n} px)"
+        return hv.Curve(
+            pd.DataFrame({"wavelength": _wl, "intensity": avg}),
+            kdims=["wavelength"], vdims=["intensity"],
+        ).opts(
+            frame_width=560, frame_height=_IMG_WW,
+            title=title, color=color,
+            xlabel="Wavelength (nm)", ylabel="Intensity",
+            line_width=2, show_grid=True, tools=["hover"],
+        )
+
+    # ── Wire DynamicMaps ───────────────────────────────────────────────────────
+    img_overlay_dmap_t4 = hv.DynamicMap(pn.bind(
+        _make_image_overlay_t4,
+        ibounds=img_bounds_t4.param.bounds,
+        igeom=img_lasso_t4.param.geometry,
+        pbounds=ph_bounds_t4.param.bounds,
+        pgeom=ph_lasso_t4.param.geometry,
+        wl_idx=wl_slider_t4,
+        mode=mode_toggle_t4,
+    ))
+    ph_overlay_dmap_t4 = hv.DynamicMap(pn.bind(
+        _make_phasor_overlay_t4,
+        ibounds=img_bounds_t4.param.bounds,
+        igeom=img_lasso_t4.param.geometry,
+        pbounds=ph_bounds_t4.param.bounds,
+        pgeom=ph_lasso_t4.param.geometry,
+        mode=mode_toggle_t4,
+    ))
+    spectrum_t4 = hv.DynamicMap(pn.bind(
+        _make_spectrum_t4,
+        ibounds=img_bounds_t4.param.bounds,
+        igeom=img_lasso_t4.param.geometry,
+        pbounds=ph_bounds_t4.param.bounds,
+        pgeom=ph_lasso_t4.param.geometry,
+        mode=mode_toggle_t4,
+    )).opts(framewise=True)
+
+    # ── Composed panels ────────────────────────────────────────────────────────
+    image_panel_t4 = (base_img_dmap_t4 * img_overlay_dmap_t4).opts(
+        hv.opts.Overlay(title="Image"),
+    )
+    phasor_panel_t4 = (ref_arc_t4 * phasor_bg_t4 * ph_overlay_dmap_t4).opts(
+        hv.opts.Overlay(
+            frame_width=_IMG_WW, frame_height=_IMG_WW,
+            xlabel="G", ylabel="S",
+            show_grid=True, padding=0.1,
+            title="Phasor",
+        ),
+    )
+
+    return pn.Column(
+        combined_warning,
+        info_md,
+        pn.Row(
+            wl_slider_t4,
+            pn.Spacer(width=30),
+            pn.Row(mode_toggle_t4, reset_btn_t4, sizing_mode="fixed"),
+            sizing_mode="fixed",
+        ),
+        pn.Row(image_panel_t4, phasor_panel_t4),
+        spectrum_t4,
+    )
+
+
 # ── Sidebar layout ────────────────────────────────────────────────────────────
 
 global_card = pn.Card(
@@ -502,11 +816,22 @@ tab3_card = pn.Card(
     collapsed=True,
 )
 
+tab4_card = pn.Card(
+    t4_file_input,
+    pn.pane.Markdown(
+        "**Start λ** and **End λ** from Global Parameters define the wavelength range.  \n"
+        "**Step λ** is ignored — it is auto-computed as linspace over the TIFF frame count."
+    ),
+    title="4) TIFF Image Stack",
+    collapsed=True,
+)
+
 sidebar = pn.Column(
     global_card,
     tab1_card,
     tab2_card,
     tab3_card,
+    tab4_card,
     margin=(10, 10),
 )
 
@@ -524,6 +849,7 @@ main_tabs = pn.Tabs(
     ("1) Single Gaussian", tab1_view),
     ("2) Multi Gaussian + Noise", tab2_view),
     ("3) Fluorescence Spectra (CSV)", tab3_view),
+    ("4) TIFF Image Stack", tab4_view),
     dynamic=True,
 )
 
@@ -531,13 +857,17 @@ main_area = pn.Column(header, main_tabs, margin=(10, 20))
 
 # ── Sync tab ↔ sidebar card collapse ──────────────────────────────────────────
 
-_tab_cards = {0: tab1_card, 1: tab2_card, 2: tab3_card}
+_tab_cards = {0: tab1_card, 1: tab2_card, 2: tab3_card, 3: tab4_card}
 
 
 def _sync_cards(event):
-    """Collapse every tab-specific card except the one for the active tab."""
+    """Collapse every tab-specific card except the one for the active tab.
+    Also disable Step λ when the TIFF tab (index 3) is active, since wavelengths
+    are derived automatically from linspace(start, end, n_frames).
+    """
     for idx, card in _tab_cards.items():
         card.collapsed = idx != event.new
+    step_lambda_input.disabled = (event.new == 3)
 
 
 main_tabs.param.watch(_sync_cards, "active")
@@ -554,6 +884,16 @@ def _on_csv_upload(event):
 
 
 t3_file_input.param.watch(_on_csv_upload, "value")
+
+
+def _on_tiff_upload(event):
+    if event.new is not None:
+        main_tabs.active = 3
+        pn.state.location.reload = False
+        pn.state.location.reload = True
+
+
+t4_file_input.param.watch(_on_tiff_upload, "value")
 
 template = pn.template.BootstrapTemplate(
     site="Spectral Analysis",
