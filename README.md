@@ -8,6 +8,12 @@ A Python application for spectral phasor analysis built with [Panel](https://pan
 - **📄 Spectra Analysis**: Import CSV files containing spectral data.
 - **🖼️ Image Analysis**: Import TIFF hyperspectral stacks for pixel‑wise phasor analysis with bidirectional selection (Image ↔ Phasor).
 
+## 🌐 Quick Preview
+
+You can get a quick preview of the application on **[GitHub Pages](https://dbp008.github.io/spectral-phasors-analysis/)** 👀
+
+But we recommend running a full local version for the best experience and complete functionality! 🚀
+
 ## 🛠️ Prerequisites
 
 The project uses [`uv`](https://github.com/astral-sh/uv) ⚡ for fast Python package management. Ensure it is installed on your system.
