@@ -2,6 +2,7 @@ import io
 
 import panel as pn
 import numpy as np
+from scipy.stats import norm
 import pandas as pd
 import xarray as xr
 import holoviews as hv
@@ -13,7 +14,7 @@ import tifffile
 import hvplot.xarray   # noqa: F401 – registers hvplot accessor
 import hvplot.pandas   # noqa: F401 – registers hvplot accessor on DataFrames
 
-pn.extension("bokeh", sizing_mode="stretch_width")
+pn.extension("bokeh", "mathjax", sizing_mode="stretch_width")
 hv.extension("bokeh")
 
 # ── Core math helpers ────────────────────────────────────────────────────────
@@ -48,7 +49,11 @@ def add_spectral_reference(ds: xr.Dataset, n_ref_points: int = 1000) -> xr.Datas
 
 
 def make_gaussian(wavelengths: np.ndarray, mean: float, std: float) -> np.ndarray:
-    return np.exp(-0.5 * ((wavelengths - mean) / std) ** 2)
+    # return np.exp(-0.5 * ((wavelengths - mean) / std) ** 2)
+    # g = np.exp(-0.5 * ((wavelengths - mean) / std) ** 2)
+    # area = np.trapezoid(g, wavelengths)
+    # return g / area
+    return norm.pdf(wavelengths, loc=mean, scale=std)
 
 
 def make_spectra_dataset(
@@ -323,6 +328,134 @@ def _toggle_snr(event):
     t2_snr.disabled = not event.new
 
 t2_add_noise.param.watch(_toggle_snr, "value")
+
+# ── Tab 5 widgets: 2-way phasor deconvolution ────────────────────────────────
+
+t5_ref_a_wl = pn.widgets.FloatSlider(
+    name="Ref A λ (nm)", start=400, end=700, value=480, step=1
+)
+t5_ref_a_std = pn.widgets.FloatSlider(
+    name="Ref A σ (nm)", start=1, end=150, value=20, step=1
+)
+t5_ref_b_wl = pn.widgets.FloatSlider(
+    name="Ref B λ (nm)", start=400, end=700, value=620, step=1
+)
+t5_ref_b_std = pn.widgets.FloatSlider(
+    name="Ref B σ (nm)", start=1, end=150, value=35, step=1
+)
+t5_mix_ratio = pn.widgets.FloatSlider(
+    name="Intensity ratio (A fraction)", start=0.0, end=1.0, value=0.27, step=0.01
+)
+t5_n_samples = pn.widgets.IntSlider(
+    name="N samples", start=10, end=500, value=100, step=10
+)
+t5_add_noise = pn.widgets.Toggle(
+    name="Add Gaussian Noise", button_type="default", value=False
+)
+t5_snr = pn.widgets.FloatSlider(
+    name="SNR (dB)", start=0, end=40, value=4, step=1, disabled=True
+)
+
+
+def _toggle_snr_t5(event):
+    t5_snr.disabled = not event.new
+
+
+t5_add_noise.param.watch(_toggle_snr_t5, "value")
+
+# ── Tab 6 widgets: 3-way phasor deconvolution ────────────────────────────────
+
+t6_ref_a_wl = pn.widgets.FloatSlider(
+    name="Ref A λ (nm)", start=400, end=700, value=420, step=1
+)
+t6_ref_a_std = pn.widgets.FloatSlider(
+    name="Ref A σ (nm)", start=1, end=150, value=20, step=1
+)
+t6_ref_b_wl = pn.widgets.FloatSlider(
+    name="Ref B λ (nm)", start=400, end=700, value=488, step=1
+)
+t6_ref_b_std = pn.widgets.FloatSlider(
+    name="Ref B σ (nm)", start=1, end=150, value=45, step=1
+)
+t6_ref_c_wl = pn.widgets.FloatSlider(
+    name="Ref C λ (nm)", start=400, end=700, value=640, step=1
+)
+t6_ref_c_std = pn.widgets.FloatSlider(
+    name="Ref C σ (nm)", start=1, end=150, value=30, step=1
+)
+t6_alpha = pn.widgets.FloatSlider(
+    name="α (A fraction)", start=0.0, end=1.0, value=0.5, step=0.01
+)
+t6_beta = pn.widgets.FloatSlider(
+    name="β (B fraction)", start=0.0, end=1.0, value=0.35, step=0.01
+)
+t6_gamma = pn.widgets.FloatSlider(
+    name="γ (C fraction)", start=0.0, end=1.0, value=0.15, step=0.01
+)
+t6_n_samples = pn.widgets.IntSlider(
+    name="N samples", start=10, end=500, value=100, step=10
+)
+t6_add_noise = pn.widgets.Toggle(
+    name="Add Gaussian Noise", button_type="default", value=False
+)
+t6_snr = pn.widgets.FloatSlider(
+    name="SNR (dB)", start=0, end=40, value=4, step=1, disabled=True
+)
+
+
+def _toggle_snr_t6(event):
+    t6_snr.disabled = not event.new
+
+
+t6_add_noise.param.watch(_toggle_snr_t6, "value")
+
+# A simple lock to prevent the function from triggering itself
+_updating = False
+
+def _clamp_abc(changed: str, event):
+    global _updating
+    if _updating: return
+    
+    _updating = True
+    try:
+        a, b, g = t6_alpha.value, t6_beta.value, t6_gamma.value
+        new_val = event.new
+        
+        if changed == "alpha":
+            remainder = 1.0 - new_val
+            old_sum = b + g
+            b = (remainder * b / old_sum) if old_sum > 0 else remainder / 2
+            g = remainder - b # Ensures exact sum to 1.0
+            t6_beta.value = round(b, 2)
+            t6_gamma.value = round(g, 2)
+            
+        elif changed == "beta":
+            remainder = 1.0 - new_val
+            old_sum = a + g
+            a = (remainder * a / old_sum) if old_sum > 0 else remainder / 2
+            g = remainder - a
+            t6_alpha.value = round(a, 2)
+            t6_gamma.value = round(g, 2)
+            
+        elif changed == "gamma":
+            remainder = 1.0 - new_val
+            old_sum = a + b
+            a = (remainder * a / old_sum) if old_sum > 0 else remainder / 2
+            b = remainder - a
+            t6_alpha.value = round(a, 2)
+            t6_beta.value = round(b, 2)
+    finally:
+        _updating = False
+
+# USE VALUE_THROTTLED TO DEBOUNCE
+t6_alpha.param.watch(lambda e: _clamp_abc("alpha", e), "value_throttled")
+t6_beta.param.watch(lambda e: _clamp_abc("beta", e), "value_throttled")
+t6_gamma.param.watch(lambda e: _clamp_abc("gamma", e), "value_throttled")
+
+
+# t6_alpha.param.watch(lambda e: _clamp_abc("alpha", e), "value")
+# t6_beta.param.watch(lambda e: _clamp_abc("beta", e), "value")
+# t6_gamma.param.watch(lambda e: _clamp_abc("gamma", e), "value")
 
 
 # ── View callbacks ────────────────────────────────────────────────────────────
@@ -778,6 +911,393 @@ def tab4_view(file_bytes, h, start, end):
     )
 
 
+@pn.depends(
+    start_lambda_input,
+    step_lambda_input,
+    end_lambda_input,
+    harmonic_input,
+    t5_ref_a_wl,
+    t5_ref_a_std,
+    t5_ref_b_wl,
+    t5_ref_b_std,
+    t5_mix_ratio,
+    t5_n_samples,
+    t5_add_noise,
+    t5_snr,
+)
+def tab5_view(
+    start, step, end, h,
+    ref_a_wl, ref_a_std, ref_b_wl, ref_b_std,
+    mix_ratio, n_samples, add_noise, snr_db,
+):
+    err = _validate_wavelengths(start, step, end)
+    if err:
+        return err
+
+    rng = np.random.default_rng()
+    wl = get_wavelengths(start, step, end)
+
+    # ── Reference spectra ──────────────────────────────────────────────────────
+    spec_a = make_gaussian(wl, ref_a_wl, ref_a_std)
+    spec_b = make_gaussian(wl, ref_b_wl, ref_b_std)
+
+    # ── Mixed spectra P ────────────────────────────────────────────────────────
+    mix_2d = np.outer(np.full(n_samples, mix_ratio), spec_a) + \
+             np.outer(np.full(n_samples, 1.0 - mix_ratio), spec_b)
+
+    if add_noise:
+        snr_linear = 10 ** (snr_db / 10)
+        sig_power = np.mean(mix_2d ** 2, axis=1, keepdims=True)
+        noise_std = np.sqrt(sig_power / snr_linear)
+        noise = rng.standard_normal(mix_2d.shape) * noise_std
+        mix_2d = np.clip(mix_2d + noise, 0, None)
+
+    # ── Phasor transform for refs ──────────────────────────────────────────────
+    all_spectra = np.vstack([spec_a[np.newaxis, :], spec_b[np.newaxis, :], mix_2d])
+    ds_all = make_spectra_dataset(wl, all_spectra, h)
+    ds_all = calculate_phasor_transform(ds_all)
+    ds_all = add_spectral_reference(ds_all)
+
+    G_a, S_a = ds_all["G"].values[0], ds_all["S"].values[0]
+    G_b, S_b = ds_all["G"].values[1], ds_all["S"].values[1]
+    G_p = ds_all["G"].values[2:]
+    S_p = ds_all["S"].values[2:]
+
+    # ── Centroid of P cloud ────────────────────────────────────────────────────
+    G_pc, S_pc = G_p.mean(), S_p.mean()
+
+    # ── Distance calculations ──────────────────────────────────────────────────
+    dist_AB = np.sqrt((G_b - G_a) ** 2 + (S_b - S_a) ** 2)
+    dist_PA = np.sqrt((G_pc - G_a) ** 2 + (S_pc - S_a) ** 2)
+    dist_PB = np.sqrt((G_pc - G_b) ** 2 + (S_pc - S_b) ** 2)
+    ratio_PA_AB = dist_PA / dist_AB if dist_AB > 1e-12 else float("nan")
+    ratio_PB_AB = dist_PB / dist_AB if dist_AB > 1e-12 else float("nan")
+
+    # Estimated mix ratio from phasor geometry:  fraction of B = PA/AB
+    estimated_a_fraction = 1.0 - ratio_PA_AB  # closer to A → more A
+
+    # ── Spectral reference arc ─────────────────────────────────────────────────
+    df_ref = ds_all[["G_ref", "S_ref"]].to_dataframe().reset_index()
+    ref_arc = df_ref.hvplot.points(
+        x="G_ref", y="S_ref",
+        color="wavelength_ref", cmap="spectral_r",
+        size=28, colorbar=False, tools=["hover"],
+    )
+
+    # ── Phasor plot: P cloud ───────────────────────────────────────────────────
+    df_p = pd.DataFrame({"G": G_p, "S": S_p})
+    p_cloud = hv.Points(df_p, kdims=["G", "S"]).opts(
+        color="gray", size=15, alpha=0.4, marker="circle",
+    )
+
+    # ── Phasor plot: reference points A and B ──────────────────────────────────
+    pt_a = hv.Points(
+        pd.DataFrame({"G": [G_a], "S": [S_a], "label": ["A"]}),
+        kdims=["G", "S"], vdims=["label"],
+    ).opts(color="blue", size=30, marker="star_dot", alpha=0.8, tools=["hover"])
+    pt_b = hv.Points(
+        pd.DataFrame({"G": [G_b], "S": [S_b], "label": ["B"]}),
+        kdims=["G", "S"], vdims=["label"],
+    ).opts(color="red", size=30, marker="star_dot", alpha=0.8, tools=["hover"])
+    pt_pc = hv.Points(
+        pd.DataFrame({"G": [G_pc], "S": [S_pc], "label": ["P (centroid)"]}),
+        kdims=["G", "S"], vdims=["label"],
+    ).opts(color="green", size=30, marker="star_dot", alpha=0.8, tools=["hover"])
+    ref_points = pt_a * pt_b * pt_pc
+    ref_labels = hv.Labels(
+        pd.DataFrame({
+            "G": [G_a, G_b, G_pc],
+            "S": [S_a + 0.02, S_b + 0.02, S_pc + 0.02],
+            "text": ["A", "B", "P"],
+        }),
+        kdims=["G", "S"], vdims=["text"],
+    ).opts(text_font_size="12pt", text_color="black")
+
+    # ── Line A–B ───────────────────────────────────────────────────────────────
+    ab_line = hv.Curve(
+        pd.DataFrame({"G": [G_a, G_b], "S": [S_a, S_b]}),
+        kdims=["G"], vdims=["S"],
+    ).opts(color="black", line_dash="dashed", line_width=1.5)
+
+    phasor_plot = (ref_arc * p_cloud * ref_points * ref_labels * ab_line).opts(
+        hv.opts.Points(
+            frame_width=500, frame_height=500, padding=0.1,
+            xlabel="G", ylabel="S", show_grid=True, show_legend=False,
+            title="Phasor Plot — 2-way Deconvolution",
+        ),
+    )
+
+    # ── Spectrum plot: A, B, average of P ──────────────────────────────────────
+    avg_p = mix_2d.mean(axis=0)
+    spec_df = pd.DataFrame({
+        "wavelength": np.tile(wl, 3),
+        "intensity": np.concatenate([spec_a, spec_b, avg_p]),
+        "label": (
+            ["A (ref)"] * len(wl)
+            + ["B (ref)"] * len(wl)
+            + ["P (avg mix)"] * len(wl)
+        ),
+    })
+    spectrum_plot = spec_df.hvplot.line(
+        x="wavelength", y="intensity", by="label",
+        color=hv.Cycle(["blue", "red", "green"]),
+        line_width=3, frame_width=800, frame_height=500,
+        xlabel="Wavelength (nm)", ylabel="Intensity",
+        title="Spectra — References A, B and Mixed Average P",
+        legend="top_right",
+    )
+
+    # ── Info & formula ────────────────────────────────────────────────────────────
+    formula_md = pn.pane.Markdown(
+        f"""**Reference spectra (area-normalized Gaussians):**
+
+$$A(\\lambda) = \\exp\\left(-\\frac{{(\\lambda - {ref_a_wl:.1f})^2}}{{2 \\cdot {ref_a_std:.1f}^2}}\\right)$$
+
+$$B(\\lambda) = \\exp\\left(-\\frac{{(\\lambda - {ref_b_wl:.1f})^2}}{{2 \\cdot {ref_b_std:.1f}^2}}\\right)$$
+
+**Mixed spectrum P generated as:**
+
+$$P(\\lambda) = {mix_ratio:.3f} \\cdot A(\\lambda) + {1.0 - mix_ratio:.3f} \\cdot B(\\lambda)$$"""
+    )
+    
+    info_md = pn.pane.Markdown(
+        f"### Phasor 2-Way Deconvolution\n\n"
+        f"| Quantity | Value |\n"
+        f"|:---------|------:|\n"
+        f"| A phasor | ({G_a:.4f}, {S_a:.4f}) |\n"
+        f"| B phasor | ({G_b:.4f}, {S_b:.4f}) |\n"
+        f"| P centroid | ({G_pc:.4f}, {S_pc:.4f}) |\n"
+        f"| AB | {dist_AB:.4f} |\n"
+        f"| PA | {dist_PA:.4f} |\n"
+        f"| PB | {dist_PB:.4f} |\n"
+        f"| PA / AB | {ratio_PA_AB:.4f} |\n"
+        f"| PB / AB | {ratio_PB_AB:.4f} |\n"
+        f"| **True A fraction** | **{mix_ratio:.4f}** |\n"
+        f"| **Estimated A fraction** | **{estimated_a_fraction:.4f}** |\n",
+        styles={"font-size": "14px"},
+    )
+
+    return pn.Column(
+        formula_md,
+        pn.Row(phasor_plot, spectrum_plot, sizing_mode="stretch_width"),
+        info_md,
+    )
+
+
+# ── Tab 6: 3-way deconvolution ───────────────────────────────────────────────
+
+def _triangle_area(x1, y1, x2, y2, x3, y3):
+    """Signed area of triangle via the shoelace formula (abs for unsigned)."""
+    return abs((x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2)) / 2.0)
+
+
+@pn.depends(
+    start_lambda_input,
+    step_lambda_input,
+    end_lambda_input,
+    harmonic_input,
+    t6_ref_a_wl,
+    t6_ref_a_std,
+    t6_ref_b_wl,
+    t6_ref_b_std,
+    t6_ref_c_wl,
+    t6_ref_c_std,
+    t6_alpha,
+    t6_beta,
+    t6_gamma,
+    t6_n_samples,
+    t6_add_noise,
+    t6_snr,
+)
+def tab6_view(
+    start, step, end, h,
+    ref_a_wl, ref_a_std, ref_b_wl, ref_b_std, ref_c_wl, ref_c_std,
+    alpha, beta, gamma, n_samples, add_noise, snr_db,
+):
+    err = _validate_wavelengths(start, step, end)
+    if err:
+        return err
+
+    rng = np.random.default_rng()
+    wl = get_wavelengths(start, step, end)
+
+    # ── Reference spectra ──────────────────────────────────────────────────────
+    spec_a = make_gaussian(wl, ref_a_wl, ref_a_std)
+    spec_b = make_gaussian(wl, ref_b_wl, ref_b_std)
+    spec_c = make_gaussian(wl, ref_c_wl, ref_c_std)
+
+    # ── Mixed spectra P = α·A + β·B + γ·C ─────────────────────────────────────
+    mix_2d = (
+        np.outer(np.full(n_samples, alpha), spec_a)
+        + np.outer(np.full(n_samples, beta), spec_b)
+        + np.outer(np.full(n_samples, gamma), spec_c)
+    )
+
+    if add_noise:
+        snr_linear = 10 ** (snr_db / 10)
+        sig_power = np.mean(mix_2d ** 2, axis=1, keepdims=True)
+        noise_std = np.sqrt(sig_power / snr_linear)
+        noise = rng.standard_normal(mix_2d.shape) * noise_std
+        mix_2d = np.clip(mix_2d + noise, 0, None)
+
+    # ── Phasor transform ───────────────────────────────────────────────────────
+    all_spectra = np.vstack([
+        spec_a[np.newaxis, :],
+        spec_b[np.newaxis, :],
+        spec_c[np.newaxis, :],
+        mix_2d,
+    ])
+    ds_all = make_spectra_dataset(wl, all_spectra, h)
+    ds_all = calculate_phasor_transform(ds_all)
+    ds_all = add_spectral_reference(ds_all)
+
+    G_a, S_a = ds_all["G"].values[0], ds_all["S"].values[0]
+    G_b, S_b = ds_all["G"].values[1], ds_all["S"].values[1]
+    G_c, S_c = ds_all["G"].values[2], ds_all["S"].values[2]
+    G_p = ds_all["G"].values[3:]
+    S_p = ds_all["S"].values[3:]
+
+    # ── Centroid of P cloud ────────────────────────────────────────────────────
+    G_pc, S_pc = G_p.mean(), S_p.mean()
+
+    # ── Triangle-area deconvolution ────────────────────────────────────────────
+    area_ABC = _triangle_area(G_a, S_a, G_b, S_b, G_c, S_c)
+    area_PBC = _triangle_area(G_pc, S_pc, G_b, S_b, G_c, S_c)  # opposite A
+    area_APC = _triangle_area(G_a, S_a, G_pc, S_pc, G_c, S_c)  # opposite B
+    area_ABP = _triangle_area(G_a, S_a, G_b, S_b, G_pc, S_pc)  # opposite C
+
+    if area_ABC > 1e-12:
+        est_alpha = area_PBC / area_ABC
+        est_beta  = area_APC / area_ABC
+        est_gamma = area_ABP / area_ABC
+    else:
+        est_alpha = est_beta = est_gamma = float("nan")
+
+    # ── Spectral reference arc ─────────────────────────────────────────────────
+    df_ref = ds_all[["G_ref", "S_ref"]].to_dataframe().reset_index()
+    ref_arc = df_ref.hvplot.points(
+        x="G_ref", y="S_ref",
+        color="wavelength_ref", cmap="spectral_r",
+        size=28, colorbar=False, tools=["hover"],
+    )
+
+    # ── P cloud ────────────────────────────────────────────────────────────────
+    df_p = pd.DataFrame({"G": G_p, "S": S_p})
+    p_cloud = hv.Points(df_p, kdims=["G", "S"]).opts(
+        color="gray", size=15, alpha=0.4, marker="circle",
+    )
+
+    # ── Reference points A, B, C & centroid ────────────────────────────────────
+    pt_a = hv.Points(
+        pd.DataFrame({"G": [G_a], "S": [S_a], "label": ["A"]}),
+        kdims=["G", "S"], vdims=["label"],
+    ).opts(color="blue", size=30, marker="star_dot", alpha=0.8, tools=["hover"])
+    pt_b = hv.Points(
+        pd.DataFrame({"G": [G_b], "S": [S_b], "label": ["B"]}),
+        kdims=["G", "S"], vdims=["label"],
+    ).opts(color="red", size=30, marker="star_dot", alpha=0.8, tools=["hover"])
+    pt_c = hv.Points(
+        pd.DataFrame({"G": [G_c], "S": [S_c], "label": ["C"]}),
+        kdims=["G", "S"], vdims=["label"],
+    ).opts(color="orange", size=30, marker="star_dot", alpha=0.8, tools=["hover"])
+    pt_pc = hv.Points(
+        pd.DataFrame({"G": [G_pc], "S": [S_pc], "label": ["P (centroid)"]}),
+        kdims=["G", "S"], vdims=["label"],
+    ).opts(color="green", size=30, marker="star_dot", alpha=0.8, tools=["hover"])
+    ref_points = pt_a * pt_b * pt_c * pt_pc
+    ref_labels = hv.Labels(
+        pd.DataFrame({
+            "G": [G_a, G_b, G_c, G_pc],
+            "S": [S_a + 0.02, S_b + 0.02, S_c + 0.02, S_pc + 0.02],
+            "text": ["A", "B", "C", "P"],
+        }),
+        kdims=["G", "S"], vdims=["text"],
+    ).opts(text_font_size="12pt", text_color="black")
+
+    # ── Triangle A–B–C ─────────────────────────────────────────────────────────
+    tri = hv.Curve(
+        pd.DataFrame({"G": [G_a, G_b, G_c, G_a], "S": [S_a, S_b, S_c, S_a]}),
+        kdims=["G"], vdims=["S"],
+    ).opts(color="black", line_dash="dashed", line_width=1.5)
+
+    phasor_plot = (ref_arc * p_cloud * ref_points * ref_labels * tri).opts(
+        hv.opts.Points(
+            frame_width=500, frame_height=500, padding=0.1,
+            xlabel="G", ylabel="S", show_grid=True, show_legend=False,
+            title="Phasor Plot — 3-way Deconvolution",
+        ),
+    )
+
+    # ── Spectrum plot: A, B, C, average P ──────────────────────────────────────
+    avg_p = mix_2d.mean(axis=0)
+    spec_df = pd.DataFrame({
+        "wavelength": np.tile(wl, 4),
+        "intensity": np.concatenate([spec_a, spec_b, spec_c, avg_p]),
+        "label": (
+            ["A (ref)"] * len(wl)
+            + ["B (ref)"] * len(wl)
+            + ["C (ref)"] * len(wl)
+            + ["P (avg mix)"] * len(wl)
+        ),
+    })
+    spectrum_plot = spec_df.hvplot.line(
+        x="wavelength", y="intensity", by="label",
+        color=hv.Cycle(["blue", "red", "orange", "green"]),
+        line_width=3, frame_width=800, frame_height=500,
+        xlabel="Wavelength (nm)", ylabel="Intensity",
+        title="Spectra — References A, B, C and Mixed Average P",
+        legend="top_right",
+    )
+
+    # ── Info & formula ─────────────────────────────────────────────────────────
+    formula_md = pn.pane.Markdown(
+        f"""**Reference spectra (area-normalized Gaussians):**
+
+$$A(\\lambda) = \\exp\\left(-\\frac{{(\\lambda - {ref_a_wl:.1f})^2}}{{2 \\cdot {ref_a_std:.1f}^2}}\\right)$$
+
+$$B(\\lambda) = \\exp\\left(-\\frac{{(\\lambda - {ref_b_wl:.1f})^2}}{{2 \\cdot {ref_b_std:.1f}^2}}\\right)$$
+
+$$C(\\lambda) = \\exp\\left(-\\frac{{(\\lambda - {ref_c_wl:.1f})^2}}{{2 \\cdot {ref_c_std:.1f}^2}}\\right)$$
+
+**Mixed spectrum P generated as:**
+
+$$P(\\lambda) = {alpha:.3f} \\cdot A(\\lambda) + {beta:.3f} \\cdot B(\\lambda) + {gamma:.3f} \\cdot C(\\lambda)$$
+
+**Triangle-area deconvolution:**
+
+$$\\hat{{\\alpha}} = \\frac{{\\Delta_{{PBC}}}}{{\\Delta_{{ABC}}}}, \\quad
+\\hat{{\\beta}}  = \\frac{{\\Delta_{{APC}}}}{{\\Delta_{{ABC}}}}, \\quad
+\\hat{{\\gamma}} = \\frac{{\\Delta_{{ABP}}}}{{\\Delta_{{ABC}}}}$$"""
+    )
+
+    info_md = pn.pane.Markdown(
+        f"### Phasor 3-Way Deconvolution\n\n"
+        f"| Quantity | Value |\n"
+        f"|:---------|------:|\n"
+        f"| A phasor | ({G_a:.4f}, {S_a:.4f}) |\n"
+        f"| B phasor | ({G_b:.4f}, {S_b:.4f}) |\n"
+        f"| C phasor | ({G_c:.4f}, {S_c:.4f}) |\n"
+        f"| P centroid | ({G_pc:.4f}, {S_pc:.4f}) |\n"
+        f"| ΔABC | {area_ABC:.6f} |\n"
+        f"| ΔPBC | {area_PBC:.6f} |\n"
+        f"| ΔAPC | {area_APC:.6f} |\n"
+        f"| ΔABP | {area_ABP:.6f} |\n"
+        f"| **True α (A)** | **{alpha:.4f}** |\n"
+        f"| **Estimated α** | **{est_alpha:.4f}** |\n"
+        f"| **True β (B)** | **{beta:.4f}** |\n"
+        f"| **Estimated β** | **{est_beta:.4f}** |\n"
+        f"| **True γ (C)** | **{gamma:.4f}** |\n"
+        f"| **Estimated γ** | **{est_gamma:.4f}** |\n",
+        styles={"font-size": "14px"},
+    )
+
+    return pn.Column(
+        formula_md,
+        pn.Row(phasor_plot, spectrum_plot, sizing_mode="stretch_width"),
+        info_md,
+    )
+
+
 # ── Sidebar layout ────────────────────────────────────────────────────────────
 
 global_card = pn.Card(
@@ -803,7 +1323,6 @@ tab2_card = pn.Card(
     t2_mean_spread,
     t2_std_base,
     t2_std_spread,
-    pn.layout.Divider(),
     t2_add_noise,
     t2_snr,
     title="2) Multi Gaussian + Noise",
@@ -826,12 +1345,44 @@ tab4_card = pn.Card(
     collapsed=True,
 )
 
+tab5_card = pn.Card(
+    t5_ref_a_wl,
+    t5_ref_a_std,
+    t5_ref_b_wl,
+    t5_ref_b_std,
+    t5_mix_ratio,
+    t5_n_samples,
+    t5_add_noise,
+    t5_snr,
+    title="5) 2-Way Deconvolution",
+    collapsed=True,
+)
+
+tab6_card = pn.Card(
+    t6_ref_a_wl,
+    t6_ref_a_std,
+    t6_ref_b_wl,
+    t6_ref_b_std,
+    t6_ref_c_wl,
+    t6_ref_c_std,
+    t6_alpha,
+    t6_beta,
+    t6_gamma,
+    t6_n_samples,
+    t6_add_noise,
+    t6_snr,
+    title="6) 3-Way Deconvolution",
+    collapsed=True,
+)
+
 sidebar = pn.Column(
     global_card,
     tab1_card,
     tab2_card,
     tab3_card,
     tab4_card,
+    tab5_card,
+    tab6_card,
     margin=(10, 10),
 )
 
@@ -850,6 +1401,8 @@ main_tabs = pn.Tabs(
     ("2) Multi Gaussian + Noise", tab2_view),
     ("3) Fluorescence Spectra (CSV)", tab3_view),
     ("4) TIFF Image Stack", tab4_view),
+    ("5) 2-Way Deconvolution", tab5_view),
+    ("6) 3-Way Deconvolution", tab6_view),
     dynamic=True,
 )
 
@@ -857,7 +1410,7 @@ main_area = pn.Column(header, main_tabs, margin=(10, 20))
 
 # ── Sync tab ↔ sidebar card collapse ──────────────────────────────────────────
 
-_tab_cards = {0: tab1_card, 1: tab2_card, 2: tab3_card, 3: tab4_card}
+_tab_cards = {0: tab1_card, 1: tab2_card, 2: tab3_card, 3: tab4_card, 4: tab5_card, 5: tab6_card}
 
 
 def _sync_cards(event):
@@ -868,6 +1421,7 @@ def _sync_cards(event):
     for idx, card in _tab_cards.items():
         card.collapsed = idx != event.new
     step_lambda_input.disabled = (event.new == 3)
+    show_individual.disabled = (event.new in (4, 5))
 
 
 main_tabs.param.watch(_sync_cards, "active")
@@ -905,4 +1459,4 @@ template = pn.template.BootstrapTemplate(
 template.servable()
 
 if __name__ == "__main__":
-    pn.serve(template, show=True)
+    pn.serve(template, show=True, port=5900)
