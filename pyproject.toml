@@ -1,7 +1,10 @@
 [project]
 name = "spectral-phasors-analysis"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "A Python application for spectral phasor analysis built with Panel and HoloViews. This tool allows you to explore spectral phasors through simulations (single/multi‑Gaussian) and analyze real experimental data via CSV spectra or TIFF hyperspectral stacks."
+authors = [
+  {name = "Davide Panzeri"},
+]
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [

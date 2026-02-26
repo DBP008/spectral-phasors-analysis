@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+
 import io
 
 import panel as pn
@@ -13,6 +15,7 @@ import colorcet
 import tifffile
 import hvplot.xarray   # noqa: F401 – registers hvplot accessor
 import hvplot.pandas   # noqa: F401 – registers hvplot accessor on DataFrames
+import sys
 
 pn.extension("bokeh", "mathjax", sizing_mode="stretch_width")
 hv.extension("bokeh")
@@ -212,6 +215,16 @@ def build_spectrum_dmap(
     """
     selection = streams.Selection1D(source=sample_plot)
 
+    # ── Compute axis limits once from the full dataset ───────────────────────
+    wl_min = float(ds.wavelength.min())
+    wl_max = float(ds.wavelength.max())
+    int_min = float(ds.intensity.min())
+    int_max = float(ds.intensity.max())
+    wl_pad  = (wl_max  - wl_min)  * 0.02
+    int_pad = (int_max - int_min) * 0.05
+    xlim = (wl_min  - wl_pad,  wl_max  + wl_pad)
+    ylim = (int_min - int_pad, int_max + int_pad)
+
     # Build the full individual-spectra overlay once (outside the callback)
     # so filtering is cheap and colours are consistent.
     hv_ds = hv.Dataset(
@@ -229,9 +242,12 @@ def build_spectrum_dmap(
             # hover_tooltips=[("sample","@sample"), ("wavelength","@x"), ("intensity","@y")],
             xlabel="wavelength (nm)",
             ylabel="intensity",
-            title="spectrum"
+            title="spectrum",
+            xlim=xlim,
+            ylim=ylim,
+            framewise=True
         ),
-        hv.opts.NdOverlay(show_legend=False, batched=True),
+        hv.opts.NdOverlay(show_legend=False, framewise=True),
     )
 
     def select_spectrum(index):
@@ -257,9 +273,12 @@ def build_spectrum_dmap(
             line_width=3,
             frame_width=800,
             frame_height=500,
-        )
+            xlim=xlim,
+            ylim=ylim,
+        ).opts(framewise=True)
         return hv.NdOverlay({"Average": avg_curve}, kdims="sample").opts(
             show_legend=False,
+            framewise=True,
         )
 
     return hv.DynamicMap(select_spectrum, streams=[selection]).opts(framewise=True)
@@ -1403,7 +1422,7 @@ main_tabs = pn.Tabs(
     ("4) TIFF Image Stack", tab4_view),
     ("5) 2-Way Deconvolution", tab5_view),
     ("6) 3-Way Deconvolution", tab6_view),
-    dynamic=True,
+    # dynamic=True,
 )
 
 main_area = pn.Column(header, main_tabs, margin=(10, 20))
@@ -1433,8 +1452,9 @@ def _on_csv_upload(event):
     if event.new is not None:
         show_individual.value = True
         main_tabs.active = 2
-        pn.state.location.reload = False
-        pn.state.location.reload = True
+        
+        # pn.state.location.reload = False
+        # pn.state.location.reload = True
 
 
 t3_file_input.param.watch(_on_csv_upload, "value")
@@ -1443,8 +1463,8 @@ t3_file_input.param.watch(_on_csv_upload, "value")
 def _on_tiff_upload(event):
     if event.new is not None:
         main_tabs.active = 3
-        pn.state.location.reload = False
-        pn.state.location.reload = True
+        # pn.state.location.reload = False
+        # pn.state.location.reload = True
 
 
 t4_file_input.param.watch(_on_tiff_upload, "value")
@@ -1458,5 +1478,5 @@ template = pn.template.BootstrapTemplate(
 
 template.servable()
 
-if __name__ == "__main__":
+if __name__ == "__main__" and "pyodide" not in sys.modules:
     pn.serve(template, show=True, port=5900)

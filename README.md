@@ -49,3 +49,4 @@ Sample datasets are provided in the `data/` folder to help you get started:
 
 - `Denaturation.csv`: Example fluorescence spectra data acquired with a **Cary Eclipse Fluorescence Spectrometer** 🧬.
 - `.tif` files: Example hyperspectral stacks (lambda‑xy scans) acquired with a **Leica confocal microscope** 🔬.
+
