@@ -290,7 +290,7 @@ start_lambda_input = pn.widgets.FloatInput(
     name="Start λ (nm)", value=400, step=10, width=160
 )
 step_lambda_input = pn.widgets.FloatInput(
-    name="Step λ (nm)", value=5, step=1, width=160
+    name="Step λ (nm)", value=1, step=1, width=160
 )
 end_lambda_input = pn.widgets.FloatInput(
     name="End λ (nm)", value=700, step=10, width=160
@@ -324,17 +324,17 @@ t4_file_input = pn.widgets.FileInput(accept=".tif,.tiff", multiple=False, name="
 t2_n_samples = pn.widgets.IntSlider(
     name="N samples", start=10, end=500, value=100, step=10
 )
-t2_mean_base = pn.widgets.FloatSlider(
+t2_center_wl = pn.widgets.FloatSlider(
     name="Center wavelength λ (nm)", start=400, end=700, value=550, step=1
 )
-t2_mean_spread = pn.widgets.FloatSlider(
-    name="Wavelength variance σ (nm)", start=0, end=100, value=10, step=1
+t2_sigma = pn.widgets.FloatSlider(
+    name="Wavelength variance σ (nm)", start=0, end=100, value=30, step=1
 )
-t2_std_base = pn.widgets.FloatSlider(
-    name="Wavelength jitter Δλ (nm)", start=1, end=150, value=30, step=1
+t2_jitter_wl = pn.widgets.FloatSlider(
+    name="Wavelength jitter Δλ (nm)", start=0, end=100, value=0, step=1
 )
-t2_std_spread = pn.widgets.FloatSlider(
-    name="Variance jitter Δσ (nm)", start=0, end=60, value=5, step=1
+t2_jitter_sigma = pn.widgets.FloatSlider(
+    name="Variance jitter Δσ (nm)", start=0, end=60, value=0, step=1
 )
 t2_add_noise = pn.widgets.Toggle(
     name="Add Gaussian Noise", button_type="default", value=False
@@ -520,17 +520,17 @@ def tab1_view(start, step, end, h, mean, std, show_ind):
     end_lambda_input,
     harmonic_input,
     t2_n_samples,
-    t2_mean_base,
-    t2_mean_spread,
-    t2_std_base,
-    t2_std_spread,
+    t2_center_wl,
+    t2_sigma,
+    t2_jitter_wl,
+    t2_jitter_sigma,
     t2_add_noise,
     t2_snr,
     show_individual,
 )
 def tab2_view(
     start, step, end, h,
-    n_samples, mean_base, mean_spread, std_base, std_spread,
+    n_samples, center_wl, sigma, jitter_wl, jitter_sigma,
     add_noise, snr_db, show_ind,
 ):
     err = _validate_wavelengths(start, step, end)
@@ -540,16 +540,15 @@ def tab2_view(
     rng = np.random.default_rng()
     wl = get_wavelengths(start, step, end)
 
-    # Draw random means and stds for each sample
     means = (
-        rng.normal(mean_base, mean_spread, n_samples)
-        if mean_spread > 0
-        else np.full(n_samples, float(mean_base))
+        center_wl + rng.uniform(-jitter_wl, jitter_wl, n_samples)
+        if jitter_wl > 0
+        else np.full(n_samples, float(center_wl))
     )
     stds = (
-        np.clip(rng.normal(std_base, std_spread, n_samples), 0.5, None)
-        if std_spread > 0
-        else np.full(n_samples, float(std_base))
+        np.clip(sigma + rng.uniform(-jitter_sigma, jitter_sigma, n_samples), 0.5, None)
+        if jitter_sigma > 0
+        else np.full(n_samples, float(sigma))
     )
 
     intensities = np.stack([make_gaussian(wl, m, s) for m, s in zip(means, stds)])
@@ -1338,10 +1337,10 @@ tab1_card = pn.Card(
 
 tab2_card = pn.Card(
     t2_n_samples,
-    t2_mean_base,
-    t2_mean_spread,
-    t2_std_base,
-    t2_std_spread,
+    t2_center_wl,
+    t2_sigma,
+    t2_jitter_wl,
+    t2_jitter_sigma,
     t2_add_noise,
     t2_snr,
     title="2) Multi Gaussian + Noise",
