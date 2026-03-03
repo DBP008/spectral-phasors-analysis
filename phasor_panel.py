@@ -16,6 +16,9 @@ import tifffile
 import hvplot.xarray   # noqa: F401 – registers hvplot accessor
 import hvplot.pandas   # noqa: F401 – registers hvplot accessor on DataFrames
 import sys
+from pathlib import Path
+
+_DATA_DIR = Path("docs/data")
 
 pn.extension("bokeh", "mathjax", sizing_mode="stretch_width")
 hv.extension("bokeh")
@@ -314,10 +317,20 @@ t1_std = pn.widgets.FloatSlider(
 # ── Tab 3 widgets: CSV upload ─────────────────────────────────────────────────
 
 t3_file_input = pn.widgets.FileInput(accept=".csv", multiple=False, name="Upload CSV")
+t3_example_btn = pn.widgets.Button(
+    name="Load Denaturation (example)",
+)
 
 # ── Tab 4 widgets: TIFF image upload ─────────────────────────────────────────
 
 t4_file_input = pn.widgets.FileInput(accept=".tif,.tiff", multiple=False, name="Upload TIFF")
+t4_example_intestine_btn = pn.widgets.Button(
+    name="Mouse Intestine (example)",
+
+)
+t4_example_dermis_btn = pn.widgets.Button(
+    name="Mouse Dermis (example)",
+)
 
 # ── Tab 2 widgets: multi gaussian + noise ────────────────────────────────────
 
@@ -1349,6 +1362,7 @@ tab2_card = pn.Card(
 
 tab3_card = pn.Card(
     t3_file_input,
+    t3_example_btn,
     title="3) Fluorescence Spectra (CSV)",
     collapsed=True,
 )
@@ -1359,6 +1373,8 @@ tab4_card = pn.Card(
         "**Start λ** and **End λ** from Global Parameters define the wavelength range.  \n"
         "**Step λ** is ignored — it is auto-computed as linspace over the TIFF frame count."
     ),
+    t4_example_intestine_btn,
+    t4_example_dermis_btn,
     title="4) TIFF Image Stack",
     collapsed=True,
 )
@@ -1447,6 +1463,41 @@ main_tabs.param.watch(_sync_cards, "active")
 # ── Auto-enable show_individual on CSV upload ─────────────────────────────────
 
 
+def _load_example_csv(event):
+    """Read Denaturation.csv from disk (or via HTTP in Pyodide) and inject into the FileInput widget."""
+    name = "Denaturation.csv"
+    if _DATA_DIR is not None:
+        t3_file_input.filename = name
+        t3_file_input.value = (_DATA_DIR / name).read_bytes()
+
+
+t3_example_btn.on_click(_load_example_csv)
+
+
+def _load_example_tiff_intestine(event):
+    """Read mouse-intestine TIFF from disk (or via HTTP in Pyodide) and inject into the FileInput widget."""
+    name = r"intestino.lif - 512x512_390-780nm_5nm_488 12%_561 11%_blank_256_median_cleancut.tif"
+    start_lambda_input.value = 390
+    end_lambda_input.value = 780
+    if _DATA_DIR is not None:
+        t4_file_input.filename = name
+        t4_file_input.value = (_DATA_DIR / name).read_bytes()
+
+
+def _load_example_tiff_dermis(event):
+    """Read mouse-dermis TIFF from disk (or via HTTP in Pyodide) and inject into the FileInput widget."""
+    name = r"mix2.lif - mix_400-790_488-6pc_561-7pc_633_5pc_b_blank_256bin.tif"
+    start_lambda_input.value = 400
+    end_lambda_input.value = 790
+    if _DATA_DIR is not None:
+        t4_file_input.filename = name
+        t4_file_input.value = (_DATA_DIR / name).read_bytes()
+
+
+t4_example_intestine_btn.on_click(_load_example_tiff_intestine)
+t4_example_dermis_btn.on_click(_load_example_tiff_dermis)
+
+
 def _on_csv_upload(event):
     if event.new is not None:
         show_individual.value = True
@@ -1468,7 +1519,7 @@ def _on_tiff_upload(event):
 
 t4_file_input.param.watch(_on_tiff_upload, "value")
 
-template = pn.template.BootstrapTemplate(
+template = pn.template.MaterialTemplate(
     site="Spectral Analysis",
     title="Phasors App",
     sidebar=[sidebar],

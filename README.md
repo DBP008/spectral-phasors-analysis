@@ -10,7 +10,7 @@ A Python application for spectral phasor analysis built with [Panel](https://pan
 
 ## 🌐 Quick Preview
 
-You can get a quick preview of the application on **[GitHub Pages](https://dbp008.github.io/spectral-phasors-analysis/)** 👀
+You can get a quick preview of the application on **[GitHub Pages](https://dbp008.github.io/spectral-phasors-analysis/phasor_panel.html)** 👀
 
 But we recommend running a full local version for the best experience and complete functionality! 🚀
 
@@ -56,3 +56,8 @@ Sample datasets are provided in the `data/` folder to help you get started:
 - `Denaturation.csv`: Example fluorescence spectra data acquired with a **Cary Eclipse Fluorescence Spectrometer** 🧬.
 - `.tif` files: Example hyperspectral stacks (lambda‑xy scans) acquired with a **Leica confocal microscope** 🔬.
 
+## 📃 Build GitHub Pages
+
+```ps
+uv run panel convert phasor_panel.py --index --to pyodide-worker --out docs --resources "docs\data\Denaturation.csv" "docs\data\intestino.lif - 512x512_390-780nm_5nm_488 12%_561 11%_blank_256_median_cleancut.tif" "docs\data\mix2.lif - mix_400-790_488-6pc_561-7pc_633_5pc_b_blank_256bin.tif"
+```
