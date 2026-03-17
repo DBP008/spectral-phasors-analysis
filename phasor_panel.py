@@ -18,9 +18,9 @@ import hvplot.pandas   # noqa: F401 – registers hvplot accessor on DataFrames
 import sys
 from pathlib import Path
 
-_DATA_DIR = Path("docs/data")
+_DATA_DIR = Path("docs") / "data"
 
-pn.extension("bokeh", "mathjax", sizing_mode="stretch_width")
+pn.extension("bokeh", "mathjax", sizing_mode="stretch_width", loading_indicator=True, loading_spinner='dots')
 hv.extension("bokeh")
 
 # ── Core math helpers ────────────────────────────────────────────────────────
@@ -238,7 +238,7 @@ def build_spectrum_dmap(
     individual_plot = hv_ds.to(hv.Curve, "wavelength", "intensity").overlay("sample").opts(
         hv.opts.Curve(
             color=hv.Cycle(list(color_mapping.values())),
-            frame_width=800,
+            responsive=True,
             frame_height=500,
             line_width=3,
             tools=["hover"],
@@ -274,7 +274,7 @@ def build_spectrum_dmap(
             title=f"Average Spectrum ({title}){suffix}",
             color="black",
             line_width=3,
-            frame_width=800,
+            responsive=True,
             frame_height=500,
             xlim=xlim,
             ylim=ylim,
@@ -1072,7 +1072,7 @@ def tab5_view(
     spectrum_plot = spec_df.hvplot.line(
         x="wavelength", y="intensity", by="label",
         color=hv.Cycle(["blue", "red", "green"]),
-        line_width=3, frame_width=800, frame_height=500,
+        line_width=3, responsive=True, frame_height=500,
         xlabel="Wavelength (nm)", ylabel="Intensity",
         title="Spectra — References A, B and Mixed Average P",
         legend="top_right",
@@ -1274,7 +1274,7 @@ def tab6_view(
     spectrum_plot = spec_df.hvplot.line(
         x="wavelength", y="intensity", by="label",
         color=hv.Cycle(["blue", "red", "orange", "green"]),
-        line_width=3, frame_width=800, frame_height=500,
+        line_width=3, responsive=True, frame_height=500,
         xlabel="Wavelength (nm)", ylabel="Intensity",
         title="Spectra — References A, B, C and Mixed Average P",
         legend="top_right",
@@ -1345,7 +1345,7 @@ tab1_card = pn.Card(
     t1_mean,
     t1_std,
     title="1) Single Gaussian",
-    collapsed=False,
+    collapsed=True,
 )
 
 tab2_card = pn.Card(
@@ -1440,11 +1440,13 @@ main_tabs = pn.Tabs(
     # dynamic=True,
 )
 
-main_area = pn.Column(header, main_tabs, margin=(10, 20))
+main_area = pn.Column(header, main_tabs)
 
 # ── Sync tab ↔ sidebar card collapse ──────────────────────────────────────────
 
 _tab_cards = {0: tab1_card, 1: tab2_card, 2: tab3_card, 3: tab4_card, 4: tab5_card, 5: tab6_card}
+
+_syncing = False
 
 
 def _sync_cards(event):
@@ -1452,13 +1454,39 @@ def _sync_cards(event):
     Also disable Step λ when the TIFF tab (index 3) is active, since wavelengths
     are derived automatically from linspace(start, end, n_frames).
     """
-    for idx, card in _tab_cards.items():
-        card.collapsed = idx != event.new
-    step_lambda_input.disabled = (event.new == 3)
-    show_individual.disabled = (event.new in (4, 5))
+    global _syncing
+    if _syncing:
+        return
+    _syncing = True
+    try:
+        for idx, card in _tab_cards.items():
+            card.collapsed = idx != event.new
+        step_lambda_input.disabled = (event.new == 3)
+        show_individual.disabled = (event.new in (4, 5))
+    finally:
+        _syncing = False
+
+
+def _sync_tab_from_card(card_idx, event):
+    """Switch to the tab whose card was just expanded."""
+    global _syncing
+    if _syncing or event.new:  # event.new=True means it was collapsed, ignore
+        return
+    _syncing = True
+    try:
+        main_tabs.active = card_idx
+        for idx, card in _tab_cards.items():
+            if idx != card_idx:
+                card.collapsed = True
+        step_lambda_input.disabled = (card_idx == 3)
+        show_individual.disabled = (card_idx in (4, 5))
+    finally:
+        _syncing = False
 
 
 main_tabs.param.watch(_sync_cards, "active")
+for _card_idx, _card in _tab_cards.items():
+    _card.param.watch(lambda e, i=_card_idx: _sync_tab_from_card(i, e), "collapsed")
 
 # ── Auto-enable show_individual on CSV upload ─────────────────────────────────
 
